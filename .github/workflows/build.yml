@@ -1,0 +1,80 @@
+name: Build Minis Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages (NDK r28, CMake 3.22.1)
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> $GITHUB_ENV
+
+      - name: Copy build customization template
+        run: |
+          cp src/android/app/provider-customization.properties.example \
+             src/android/app/provider-customization.properties
+
+      - name: Build PRoot (cross-compile)
+        run: |
+          chmod +x deps/*.sh scripts/*.sh
+          ./deps/build_proot.sh
+
+      - name: Prepare Alpine sandbox
+        run: ./scripts/prepare_android_sandbox.sh
+
+      - name: Build rclone AAR (gomobile)
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          gomobile init
+          ./deps/build_rclone_android.sh
+          mkdir -p src/android/app/libs
+          cp deps/build/rclone/rclone.aar src/android/app/libs/
+
+      - name: Verify native artifacts
+        run: |
+          ls -lh src/android/app/src/main/assets/proot-aarch64
+          ls -lh src/android/app/src/main/jniLibs/arm64-v8a/
+          ls -lh src/android/app/libs/rclone.aar
+
+      - name: Gradle assembleDebug
+        working-directory: src/android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: minis-debug-apk
+          path: src/android/app/build/outputs/apk/debug/*.apk
+          retention-days: 14
+          if-no-files-found: error
